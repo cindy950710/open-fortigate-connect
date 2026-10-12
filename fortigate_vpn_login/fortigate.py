@@ -26,7 +26,10 @@ class Fortigate(object):
         """
         self.xml_config = None
         self.json_config = None
-        self.url = url
+        url = url.strip()
+        if not url.startswith(('http://', 'https://')):
+            url = f"https://{url}"
+        self.url = url.rstrip('/')
 
     def connect_saml(self) -> Optional[str]:
         """
@@ -39,7 +42,7 @@ class Fortigate(object):
             logger.debug(f"Requesting: {self.url}/remote/saml/start?redirect=1")
             response = requests.get(url=f"{self.url}/remote/saml/start?redirect=1", timeout=10)
 
-        except requests.exceptions.MissingSchema as e:
+        except (requests.exceptions.MissingSchema, requests.exceptions.InvalidSchema, requests.exceptions.InvalidURL) as e:
             print(f"ERROR: Invalid forti_url option: {self.url}, should be something like: "
                   'https://server-vpn.example.com')
             logger.debug(e)
@@ -47,6 +50,11 @@ class Fortigate(object):
 
         except requests.exceptions.ConnectionError as e:
             print(f"ERROR: Connection error while requesting server {self.url}.")
+            logger.debug(e)
+            return None
+
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: Request error while requesting server {self.url}: {e}")
             logger.debug(e)
             return None
 

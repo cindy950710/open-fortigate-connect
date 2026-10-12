@@ -7,9 +7,11 @@
 """
 import logging
 import os
+import platform
 import sys
 import webbrowser
 import subprocess
+from pathlib import Path
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
 from fortigate_vpn_login import __version__, __description__, logger
 from fortigate_vpn_login import utils, config
@@ -68,6 +70,15 @@ def main() -> int:
         dest='FORTI_URL'
     )
 
+    parser.add_argument(
+        '-k',
+        '--disconnect',
+        '--kill',
+        help='Disconnect active VPN session.',
+        dest='DISCONNECT',
+        action='store_true'
+    )
+
     # windows don't have these options supported
     if not utils.is_windows():
         parser.add_argument(
@@ -86,6 +97,8 @@ def main() -> int:
             action='store_true',
             default=True
         )
+    else:
+        parser.set_defaults(FOREGROUND=False, BACKGROUND=False)
 
     # parse the arguments, show in the screen if needed, etc
     parser = parser.parse_args()
@@ -103,11 +116,33 @@ def main() -> int:
     if parser.QUIET_MODE:
         logging.disable(logging.CRITICAL)
 
-    if parser.FOREGROUND:
+    if getattr(parser, 'FOREGROUND', False):
         parser.BACKGROUND = False
 
     # load configuration
     options = config.Config()
+
+    if getattr(parser, 'DISCONNECT', False):
+        if utils.is_windows():
+            res = subprocess.run(["taskkill", "/F", "/IM", "openconnect.exe"], capture_output=True, text=True)
+            if res.returncode == 0:
+                print("VPN disconnected successfully (OpenConnect terminated).")
+            else:
+                print("No active OpenConnect VPN process found.")
+            return 0
+        else:
+            pid_file = options.get('openconnect_pid_filename')
+            pid = utils.get_openconnect_pid(pid_file) if pid_file else None
+            if pid:
+                os.kill(pid, 15)
+                print(f"VPN process (PID {pid}) terminated.")
+            else:
+                res = subprocess.run(["pkill", "openconnect"], capture_output=True)
+                if res.returncode == 0:
+                    print("VPN disconnected successfully.")
+                else:
+                    print("No active OpenConnect VPN process found.")
+            return 0
 
     # do we need to configure interactively?
     if parser.INTERACTIVE_CONFIGURE:
@@ -116,6 +151,11 @@ def main() -> int:
         return 0
 
     openconnect_path = utils.find_openconnect()
+
+    if not openconnect_path:
+        print("ERROR: Could not find openconnect executable. "
+              "Please make sure OpenConnect or OpenConnect-GUI is installed.")
+        return 1
 
     # openconnect compatability check
     if not utils.check_openconnect_version(openconnect_path):
@@ -134,13 +174,15 @@ def main() -> int:
 
     # establish connection to the Fortigate VPN Server, grab info, etc
     fortigate = Fortigate(fortigate_vpn_url)
-    url = fortigate.connect_saml()
-    if not url:
-        return 1
+    fortigate_vpn_url = fortigate.url
+
+    # In FortiOS SAML workflow, the browser must initiate the flow via /remote/saml/start?redirect=1
+    # directly so the browser maintains session cookies and context across IdP redirects.
+    saml_start_url = f"{fortigate.url}/remote/saml/start?redirect=1"
 
     # webserver to get the response from the IDP through browser request
     ws = webserver.run()
-    webbrowser.open(url)
+    webbrowser.open(saml_start_url)
     auth_id = webserver.return_token()
     webserver.quit(ws)
 
@@ -149,16 +191,22 @@ def main() -> int:
         return 1
 
     cookie_svpn = fortigate.get_cookie(auth_id)
+    if not cookie_svpn:
+        print("ERROR: Failed to retrieve SVPNCOOKIE from server.")
+        return 1
 
     openconnect_arguments = [
         "--protocol=fortinet",
         f"--server={fortigate_vpn_url}",
-        f"--useragent=fortigate-vpn-login-{__version__}:{os.uname().version}",
+        f"--useragent=fortigate-vpn-login-{__version__}:{platform.uname().version}",
         "--no-dtls",
         "--non-inter",
         "--disable-ipv6",
         f"--cookie=SVPNCOOKIE={cookie_svpn}",
     ]
+
+    if utils.is_windows():
+        openconnect_arguments.append("--interface=vpn0")
 
     if parser.QUIET_MODE:
         openconnect_arguments.append("--quiet")
@@ -166,19 +214,29 @@ def main() -> int:
     if parser.DEBUG_MODE:
         openconnect_arguments.append("--verbose")
 
-    if parser.BACKGROUND:
+    if getattr(parser, 'BACKGROUND', False):
         openconnect_arguments.append("--quiet")
         openconnect_arguments.append("--background")
 
     command_line = []
     if utils.is_windows():
+        import tempfile
         workdir = openconnect_path.parent
+        bat_file = Path(tempfile.gettempdir()) / "fortigate_vpn_run.bat"
+        escaped_args = " ".join([f'"{arg}"' for arg in openconnect_arguments])
+        bat_content = (
+            "@echo off\r\n"
+            "title FortiGate OpenConnect VPN\r\n"
+            f'"{str(openconnect_path)}" {escaped_args}\r\n'
+            "echo.\r\n"
+            "echo OpenConnect process has exited.\r\n"
+            "pause\r\n"
+        )
+        bat_file.write_text(bat_content, encoding="utf-8")
         command_line = [
             "powershell",
             "-Command",
-            f"Start-Process '{str(openconnect_path)}' "
-            f"-ArgumentList {','.join(openconnect_arguments)} "
-            f"-Verb runAs -WorkingDirectory {workdir}",
+            f"Start-Process cmd.exe -ArgumentList '/c',\"{str(bat_file)}\" -Verb runAs -WorkingDirectory '{workdir}'",
         ]
     else:
         if not os.getuid() == 0:
@@ -189,7 +247,7 @@ def main() -> int:
     env['LC_ALL'] = 'C'
 
     try:
-        if not parser.BACKGROUND:
+        if not getattr(parser, 'BACKGROUND', False):
             subprocess.run(command_line, env=env)
         else:
             subprocess.run(command_line, env=env,

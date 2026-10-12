@@ -60,18 +60,82 @@ def find_openconnect() -> Optional[Path]:
         openconnect_path = which('openconnect')
 
     else:
-        try_paths = [
-            'c:\\Progra~1\\OpenConnect\\openconnect.exe',
-            'c:\\Progra~2\\OpenConnect\\openconnect.exe',
-            'c:\\Progra~3\\OpenConnect\\openconnect.exe',
-        ]
-        openconnect_path = which('openconnect.exe')
+        openconnect_path = which('openconnect.exe') or which('openconnect')
 
         if not openconnect_path:
+            system_drive = os.environ.get('SystemDrive', 'C:')
+            program_files = os.environ.get('ProgramFiles', f'{system_drive}\\Program Files')
+            program_files_x86 = os.environ.get('ProgramFiles(x86)', f'{system_drive}\\Program Files (x86)')
+
+            try_paths = [
+                Path(f'{system_drive}\\ProgramFiles\\OpenConnect-GUI\\openconnect.exe'),
+                Path(f'{system_drive}\\ProgramFiles\\OpenConnect\\openconnect.exe'),
+                Path(program_files) / 'OpenConnect-GUI' / 'openconnect.exe',
+                Path(program_files) / 'OpenConnect' / 'openconnect.exe',
+                Path(program_files_x86) / 'OpenConnect-GUI' / 'openconnect.exe',
+                Path(program_files_x86) / 'OpenConnect' / 'openconnect.exe',
+                Path(r'c:\Progra~1\OpenConnect-GUI\openconnect.exe'),
+                Path(r'c:\Progra~1\OpenConnect\openconnect.exe'),
+                Path(r'c:\Progra~2\OpenConnect-GUI\openconnect.exe'),
+                Path(r'c:\Progra~2\OpenConnect\openconnect.exe'),
+                Path(r'c:\Progra~3\OpenConnect-GUI\openconnect.exe'),
+                Path(r'c:\Progra~3\OpenConnect\openconnect.exe'),
+            ]
+
             for try_path in try_paths:
-                if os.path.exists(try_path) and os.access(try_path, os.X_OK) and os.path.isfile(try_path):
-                    openconnect_path = try_path
+                if try_path.is_file() and os.access(str(try_path), os.X_OK):
+                    openconnect_path = str(try_path)
                     break
+
+        if not openconnect_path:
+            # Query Windows Registry for OpenConnect installation
+            try:
+                import winreg
+                for hive in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
+                    for sub in [
+                        r'Software\Microsoft\Windows\CurrentVersion\Uninstall',
+                        r'Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+                    ]:
+                        try:
+                            with winreg.OpenKey(hive, sub) as key:
+                                num_subkeys = winreg.QueryInfoKey(key)[0]
+                                for i in range(num_subkeys):
+                                    try:
+                                        subkey_name = winreg.EnumKey(key, i)
+                                        with winreg.OpenKey(key, subkey_name) as subkey:
+                                            for val_name in ['InstallLocation', 'DisplayIcon', 'UninstallString']:
+                                                try:
+                                                    val, _ = winreg.QueryValueEx(subkey, val_name)
+                                                    if isinstance(val, str) and 'openconnect' in val.lower():
+                                                        clean_val = val.strip('"\'')
+                                                        candidate = Path(clean_val)
+                                                        if candidate.is_file():
+                                                            if candidate.name.lower() == 'openconnect.exe':
+                                                                openconnect_path = str(candidate)
+                                                                break
+                                                            exe_in_parent = candidate.parent / 'openconnect.exe'
+                                                            if exe_in_parent.is_file():
+                                                                openconnect_path = str(exe_in_parent)
+                                                                break
+                                                        elif candidate.is_dir():
+                                                            exe_in_dir = candidate / 'openconnect.exe'
+                                                            if exe_in_dir.is_file():
+                                                                openconnect_path = str(exe_in_dir)
+                                                                break
+                                                except OSError:
+                                                    pass
+                                            if openconnect_path:
+                                                break
+                                    except OSError:
+                                        pass
+                                if openconnect_path:
+                                    break
+                        except OSError:
+                            pass
+                    if openconnect_path:
+                        break
+            except Exception as e:
+                logger.debug(f"Error querying registry for openconnect: {e}")
 
     if not openconnect_path:
         return None
@@ -116,7 +180,7 @@ def get_openconnect_pid(pid_file: str) -> int:
     return pid
 
 
-def check_openconnect_version(openconnect_path: Path) -> bool:
+def check_openconnect_version(openconnect_path: Optional[Path]) -> bool:
     """
     Checks if the openconnect version is compatible with this program, mainly checking for the
     'fortinet' protocol support.
@@ -127,6 +191,9 @@ def check_openconnect_version(openconnect_path: Path) -> bool:
     Returns:
         bool: True if compatible. False if not.
     """
+    if not openconnect_path:
+        return False
+
     env = os.environ.copy()
     env['LC_ALL'] = 'C'
     process = subprocess.run([openconnect_path, '--version'], env=env, capture_output=True)

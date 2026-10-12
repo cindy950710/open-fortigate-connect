@@ -77,9 +77,13 @@ class Config(object):
         while True:
             try:
                 forti_url = self.get('forti_url')
-                response = str(input(f"Fortigate VPN Server URL [{forti_url}]: "))
+                response = str(input(f"Fortigate VPN Server URL [{forti_url}]: ")).strip()
                 if not response:
                     response = forti_url
+                if response:
+                    if not response.startswith(('http://', 'https://')):
+                        response = f"https://{response}"
+                    response = response.rstrip('/')
                 break
             except ValueError:
                 print("ERROR: Input should be string only!")
