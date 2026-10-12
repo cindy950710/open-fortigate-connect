@@ -6,6 +6,7 @@
     This is the CLI interface for running the package.
 """
 import logging
+import multiprocessing
 import os
 import platform
 import sys
@@ -31,6 +32,8 @@ def main() -> int:
         1: General error while connecting to the VPN
         2: Usage/syntax error
     """
+    multiprocessing.freeze_support()
+
     # main program argument parser
     parser = ArgumentParser(
         formatter_class=RawDescriptionHelpFormatter,
